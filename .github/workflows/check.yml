@@ -1,0 +1,43 @@
+name: 0-Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Before cleanup
+        run: |
+          df -h /
+          sw_vers
+          xcodebuild -version
+
+      - name: Cleanup
+        run: |
+          sudo rm -rf /Users/runner/Library/Android || true
+          sudo rm -rf /Library/Developer/CoreSimulator || true
+          df -h /
+
+      - name: Big folders (for info)
+        run: |
+          du -sh /Applications/Xcode*.app 2>/dev/null || true
+          du -sh /Users/runner/hostedtoolcache 2>/dev/null || true
+          du -sh /Users/runner/Library/Caches 2>/dev/null || true
+          ls /Applications | head -50
+
+      - name: Check keys secret
+        env:
+          PROD_KEYS: ${{ secrets.PROD_KEYS }}
+        run: printf '%s\n' "$PROD_KEYS" | wc -l
+
+      - name: Check Google Drive
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          brew install rclone
+          mkdir -p ~/.config/rclone
+          printf '%s\n' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          rclone lsl "gdrive:루이지 맨션"
