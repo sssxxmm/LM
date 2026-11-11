@@ -1,0 +1,114 @@
+name: Build Switch IPA
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "prepare = 셰이더까지(오래 걸림) / pack = IPA 만들기"
+        type: choice
+        options: [prepare, pack]
+        default: prepare
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 350
+    steps:
+    - name: Free Disk Space
+      run: |
+        sudo rm -rf /Users/runner/Library/Android || true
+        sudo rm -rf /Library/Developer/CoreSimulator || true
+        df -h /
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Dependencies
+      run: |
+        brew install xcodegen zstd glslang rclone
+        brew install --cask dotnet-sdk
+        python3 -m pip install --upgrade pip
+        python3 -m pip install lz4 capstone fonttools "backports.zstd" nsz
+
+    - name: Setup Rclone Config
+      env:
+        RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+      run: |
+        mkdir -p ~/.config/rclone
+        printf '%s\n' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+
+    - name: Download Game Files
+      run: |
+        mkdir -p ~/Games
+        # 젤다 왕눈 폴더 대신 루이지 맨션 폴더로 수정
+        rclone copy "gdrive:루이지 맨션/" ~/Games/ -P --include "*.xci" --include "*.nsp"
+        ls -lh ~/Games
+        nx=$(ls ~/Games/*.xci 2>/dev/null | wc -l | tr -d ' ')
+        np=$(ls ~/Games/*.nsp 2>/dev/null | wc -l | tr -d ' ')
+        echo "xci=$nx nsp=$np"
+        if [ "$nx" -eq 0 ]; then
+          echo "XCI 베이스 게임 파일이 없습니다!"; exit 1
+        fi
+        mv ~/Games/*.xci ~/Games/game.xci
+        if [ "$np" -gt 0 ]; then
+          mv ~/Games/*.nsp ~/Games/update.nsp
+        fi
+
+    - name: Restore cache from Drive (pack only)
+      if: inputs.stage == 'pack'
+      run: |
+        rclone cat "gdrive:SwitchGames/cache/build.tar" | tar -C ~/Games -xf -
+        ls ~/Games
+        df -h /
+
+    - name: Clone nxnative
+      run: git clone https://github.com/seedds/nxnative.git
+
+    - name: Setup prod.keys
+      env:
+        PROD_KEYS: ${{ secrets.PROD_KEYS }}
+      run: |
+        mkdir -p ~/keys
+        printf '%s\n' "$PROD_KEYS" > ~/keys/prod.keys
+
+    - name: Stage 1 - prepare (shaders)
+      if: inputs.stage == 'prepare'
+      env:
+        ALLOW_OTHER_METAL: "True"
+      run: |
+        cd nxnative
+        python3 scripts/build_ipa_from_nsp.py ~/Games -k ~/keys/prod.keys --prepare-xcode --allow-other-metal
+
+    - name: Stage 1 - save cache to Drive
+      if: inputs.stage == 'prepare'
+      run: |
+        df -h /
+        ls ~/Games
+        tar -C ~/Games -cf - $(cd ~/Games && ls -d *_build) \
+          | rclone rcat "gdrive:SwitchGames/cache/build.tar" \
+              --drive-chunk-size 128M -P
+
+    - name: Stage 2 - pack IPA
+      if: inputs.stage == 'pack'
+      env:
+        ALLOW_OTHER_METAL: "True"
+      run: |
+        monitor() {
+          while true; do
+            echo "=== MONITOR $(date) ==="
+            df -h / | tail -1
+            vm_stat | head -4
+            ps -axo rss,comm | sort -nr | head -3
+            sleep 120
+          done
+        }
+        monitor & MON=$!
+        trap "kill $MON 2>/dev/null" EXIT
+        cd nxnative
+        # TOTK.ipa 에서 LuigisMansion2HD.ipa 로 변경
+        nice -n 19 python3 scripts/build_ipa_from_nsp.py ~/Games -k ~/keys/prod.keys -o ~/Games/LuigisMansion2HD.ipa --allow-other-metal
+
+    - name: Stage 2 - upload IPA to Drive
+      if: inputs.stage == 'pack'
+      run: rclone copy ~/Games/LuigisMansion2HD.ipa "gdrive:SwitchGames/output" -P
